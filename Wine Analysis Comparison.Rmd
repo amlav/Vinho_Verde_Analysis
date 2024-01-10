@@ -1,0 +1,552 @@
+---
+title: "Vinho Verde Wine: Analysis + Notes"
+author: "Abby Lavoie"
+date: "2022-11-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Possible libraries needed
+```{r, include=FALSE, warning=FALSE}
+library(caret)
+library(Hmisc)
+library(DMwR2)
+library(corrplot)
+library(e1071)
+library(leaps)
+library("FSelector")
+library(BiocGenerics)
+library(MASS)
+library(class)
+library(ggplot2)
+library(randomForest)
+library(tree)
+library(olsrr)
+library(FSelector)
+library(klaR)
+```
+
+#Load data (found on kaggle: https://www.kaggle.com/datasets/yasserh/wine-quality-dataset)
+```{r, include=FALSE, warning=FALSE}
+white_wine <- read.csv("~/Grad School/Fall 22/M 748/Project/winequality-white.csv", sep=";")
+```
+
+#Basic Data Information
+White wine from Portugal, Vinho Verde type
+n=4898, p=11
+all predictors are quantitative, continuous physiochemical tests of wine
+
+response is categorical: y = quality rating
+  Taken from median value of at least 3 expert wine tasters
+  Quality rating is 0-10 scale, 0=worst and 10=best but range in this dataset is 3 to 9 - very few ratings in the tails. 
+  Summary of quality as a factor -> can see how unbablanced. Idea: condense this into 2 categories -> good and poor
+
+```{r}
+dim(white_wine)
+names(white_wine)
+head(white_wine)
+hist(white_wine$quality, xlab="Quality", main="Histogram of White Wine Quality Response")
+summary(white_wine)
+summary(factor(white_wine$quality)) # number of obs in each rating class
+```
+
+
+### Data Cleaning/Processing
+make response binary/factor
+look at correlation structure and delete highly correlated variable before splitting
+split into test and train
+
+- No missing data!
+- Initial scale of variables is different: some are 0 to 1 or 0 to 0.4, others are 1 to 10 (ish), one is 2 to 300 and another is 10 to 440. = Table printed for this
+- After standardizing variables, table shows they are much closer to each other in scale as expected.
+-Histograms of predictor variables show that some are mound-shaped and look symmetrical, but otheres are not. Will use the outcome of normality tests and skewness to determine which variables should be normalized. 
+ From the histograms of the post-scaled predictors below, the features that stand out as still not looking normally distributed are the following: residual sugar, chlorides, and alcohol. The other variables look close enough to normally distributed (especially since most tests are robust against this assumption being perfectly satisfied). When I check the skew of all the variables, residual sugars has a skewness value of 1.07 which indicates a positive skew, chlorides has a skewness value of 5 which indicates a highly positively skewed variable, and alcohol has a skew less than 1. Therefore, while I will transform the first two variables I will not worry about transforming the last variable considering it normally distributed enough. Of the other variables that I wasn't worried about based on their histograms, Volatile acidity, free sulfure dioxide, and citric acid all have skewness values over 1. I will also apply a Box Cox normalizing transformation to these variables.
+
+```{r}
+#NA's
+sum(is.na(white_wine))
+#Variable Ranges: Table, pre-standardized
+var_mins <- c(min(white_wine$fixed.acidity), min(white_wine$volatile.acidity), min(white_wine$citric.acid), min(white_wine$residual.sugar), min(white_wine$chlorides),min(white_wine$free.sulfur.dioxide), min(white_wine$total.sulfur.dioxide), min(white_wine$density), min(white_wine$pH), min(white_wine$sulphates), min(white_wine$alcohol))
+var_maxs <- c(max(white_wine$fixed.acidity), max(white_wine$volatile.acidity), max(white_wine$citric.acid), max(white_wine$residual.sugar), max(white_wine$chlorides), max(white_wine$free.sulfur.dioxide), max(white_wine$total.sulfur.dioxide), max(white_wine$density), max(white_wine$pH), max(white_wine$sulphates), max(white_wine$alcohol))
+var_info <- rbind(var_mins, var_maxs)
+colnames(var_info)=c("Fixed Acidity", "Volatile Acidity", "Citric Acid", "Residual Sugar", "Chlorides", "Free SO2", "Total SO2", "Density", "pH", "Sulphates", "Alcohol")
+rownames(var_info) = c("Min", "Max")
+var_info
+#Recode Outcome, Quality, and split into a vector. Histogram
+qual_bi <- ifelse(white_wine$quality <6, 1,0)
+hist(qual_bi, xlab="Quality", main="Histogram of White Wine Quality Response")
+summary(factor(qual_bi)) #of obs in each group
+#Histogram of pre-scaled
+par(mfrow=c(3,4))
+hist(white_wine[,1:11])
+par(mfrow=c(1,1))
+
+#Near-Zero Variance?
+nearZeroVar(white_wine[,1:11]) #None are near-zero, will not drop any at this stage
+
+#Test of Normality:
+lap_test <- lapply(white_wine, shapiro.test)
+norm_res <- numeric(11)
+for(i in 1:11){
+  norm_res[i] = lap_test[i]
+}
+norm_res #All fail the test of normality
+#Check Skew
+skew_check <- lapply(white_wine, skewness)
+skew_res <- numeric(11)
+for(j in 1:11){
+  skew_res[j] = skew_check[j]
+}
+skew_res #Var 2,3,4,5,6 skewed
+#Scale predictors:
+wine_scale <- scale(white_wine[,1:11], center=TRUE, scale=TRUE)
+wine_new <- data.frame(wine_scale, qual_bi)
+#Histograms of predictors after scaling
+par(mfrow=c(3,4))
+hist(wine_new[,1:11])
+par(mfrow=c(1,1))
+#Variable Ranges:Table, post-standardized
+var_scale_min <- c(min(wine_new$fixed.acidity), min(wine_new$volatile.acidity), min(wine_new$citric.acid), min(wine_new$residual.sugar), min(wine_new$chlorides), min(wine_new$free.sulfur.dioxide), min(wine_new$total.sulfur.dioxide), min(wine_new$density), min(wine_new$pH), min(wine_new$sulphates), min(wine_new$alcohol))
+var_scale_max <- c(max(wine_new$fixed.acidity), max(wine_new$volatile.acidity), max(wine_new$citric.acid), max(wine_new$residual.sugar), max(wine_new$chlorides), max(wine_new$free.sulfur.dioxide), max(wine_new$total.sulfur.dioxide), max(wine_new$density), max(wine_new$pH), max(wine_new$sulphates), max(wine_new$alcohol))
+var_scale_info <-rbind(var_scale_min, var_scale_max)
+colnames(var_scale_info)=c("Fixed Acidity", "Volatile Acidity", "Citric Acid", "Residual Sugar", "Chlorides", "Free SO2", "Total SO2", "Density", "pH", "Sulphates", "Alcohol")
+rownames(var_scale_info) = c("Min", "Max")
+var_scale_info
+
+#Variable Scaling
+wine_new$volatile.acidity <- scale(wine_new$volatile.acidity)
+wine_new$residual.sugar <- scale(wine_new$residual.sugar)
+wine_new$chlorides <- scale(wine_new$chlorides)
+wine_new$free.sulfur.dioxide <-scale(wine_new$free.sulfur.dioxide)
+wine_new$citric.acid <- scale(wine_new$citric.acid)
+#Check histograms again
+hist(wine_new$residual.sugar, main="Histogram of Standardized Residual Sugar", xlab = "Standardized Residual Sugar")
+```
+
+
+### Data Visualization
+Let's look at some plots and correlations
+Correlation matrix shows that the correlations between most of the variables are low/near-zero. Density has a couple of large correlations with other variables: 0.84 with residual sugar, -0.78 with alcohol. Residual sugar and alcohol do not have a large correlation (-0.45). For these reasons, I will drop density from the data set. 
+
+```{r}
+cors <- cor(wine_new[,1:11])
+corrplot(cors)
+which(abs(cors)>0.5)
+cors[which(abs(cors)>0.7)]
+#drop density
+names(wine_new) #to find index number of density
+wine_new <- wine_new[,-8]
+names(wine_new) #to ensure density was dropped. Now only 10 predictors
+```
+
+Now for some plots of data to look at relationships (although there are a large number of observations which makes scatterplots less than ideal to exhibit relationships they can still be informative).
+
+
+```{r}
+#black=0, red=1
+plot(wine_new$fixed.acidity, wine_new$sulphates, col=factor(wine_new$qual_bi))
+plot(wine_new$volatile.acidity, wine_new$free.sulfur.dioxide, col=factor(wine_new$qual_bi))
+par(mfrow=c(1, 3))
+plot(wine_new$residual.sugar, wine_new$alcohol, col=factor(wine_new$qual_bi), xlim=c(0,5), main="Quality of Wine", xlab="Residual Sugar", ylab="Alcohol")
+plot(wine_new$fixed.acidity, wine_new$pH, col=factor(wine_new$qual_bi), main="Quality of Wine", xlab="Fixed Acidity", ylab="pH")
+plot(wine_new$citric.acid, wine_new$chlorides, col=factor(wine_new$qual_bi), main="Quality of Wine", xlab="Citric Acid", ylab="Chlorides")     
+par(mfrow=c(1,1))
+```
+
+
+Split into test and train sets, using a randomly chosen 80% of the dataset to be training and 20% to be test. The train set consists of 3918 observations and the test set is 980 observations. The almost 2:1 good:poor wines ratio is retained in both the train and test set. 
+
+```{r}
+set.seed(748)
+train <- sample(1:nrow(wine_new),0.8*nrow(wine_new))
+wine_train <- wine_new[train,]
+wine_test <- wine_new[-train,]
+summary(factor(wine_train$qual_bi))
+summary(factor(wine_test$qual_bi))
+chart <- rbind(summary(factor(wine_train$qual_bi)), summary(factor(wine_test$qual_bi)))
+rownames(chart) = c("Training Set", "Testing Set")
+colnames(chart) = c("Good", "Poor")
+chart
+```
+
+
+### Feature Selection - Find the best 2-factor model and the best subset overall. 
+  2-factor models are easy and intuitive to understand but may not yield the best or even good predictions
+  
+Feature selection
+
+```{r}
+regfit.full <- regsubsets(qual_bi~.,data=wine_train,nvmax=10)
+reg.summary <- summary(regfit.full)
+reg.summary$outmat
+plot(reg.summary$adjr2, ylab = "Adjusted R^2", main="Best Subset Selection")
+#the top 2 predictors are alcohol and volatile acidity
+plot(wine_train$alcohol, wine_train$volatile.acidity, col=factor(wine_train$qual_bi))
+#this plot shows that these two predictors offer fairly decent separation b/n good and poor quality classification
+wine_testy <- wine_test$qual_bi
+test.mat <- model.matrix(qual_bi~.,data=wine_test)
+#Use test set/CV to find best model:
+set.seed(748)
+val.errors <- rep(NA,10)
+for(i in 1:10){
+  coefi <- coef(regfit.full,id=i)
+  pred <- test.mat[,names(coefi)]%*%coefi
+  pred.y <- ifelse(pred>=0.5, 1,0)
+  val.errors[i] <- sum(pred.y != wine_testy) 
+}
+val.errors
+which.min(val.errors)
+plot(val.errors, main="Best Subset Selection", ylab = "Cross Validation Errors")
+
+coef(regfit.full, 5)
+val.errors[5]-val.errors[2] #25 fewer errors for the 5-factor model
+25/980 #only 2.55% improvement in test classification error
+val.errors[5]/980
+coef(regfit.full, 2)
+
+plot(wine_new$volatile.acidity, wine_new$alcohol, col=factor(wine_new$qual_bi), ylab="Alcohol", xlab="Volatile Acidity", main="Classification of Wine Quality")
+```
+
+The best model found through cross-validation contains these 5 predictors: fixed acidity, volatile acidity, residual sugar, sulphates, and alcohol. The fitted model is: 
+
+$\hat y = 0.33594414 + 0.02530612(fixed.acidity) + 0.12418652(volatile.acidity) - 0.06114755(residual.sugar) - 0.02625800(sulphates) - 0.21605245(alcohol)$
+
+Since the best overall model (5-factors) improves in the test classification error of the best 2-factor model by only 2.55%, I believe the improvement in interpretation and visualization is justification for dropping 3 of the factors. This fitted model is:
+
+$\hat y = 0.3355817 + 0.1180736(volatile.acidity) - 0.1907672(alcohol)$
+
+
+### Data Analysis 
+calculate test classification error
+compare results 
+
+#### Method 1: Compare Naive Bayes, Linear Regression (modified for classification), LDA, Logistic Regression
+
+```{r}
+#First Naive Bayes
+nB.fit <- naiveBayes(qual_bi ~ alcohol + volatile.acidity, wine_train)
+nB.trainpred <- predict(nB.fit, wine_train)
+nB.testpred <- predict(nB.fit, wine_test)
+tr.table <- table(nB.trainpred, wine_train$qual_bi)
+te.table <- table(nB.testpred, wine_test$qual_bi)
+nB.trerr <- (742+248)/3918
+nB.teerr <- (190+66)/980
+#2nd Logistic Regression
+glm.fit <- glm(qual_bi~alcohol+volatile.acidity, wine_train, family="binomial")
+glm.probs <- predict(glm.fit, type="response") 
+glm.pred <- rep(0,3918)
+glm.pred[glm.probs>.5]=1
+glm.tr.tab <- table(glm.pred,wine_train$qual_bi)
+trainglm.err <- mean(glm.pred != wine_train$qual_bi)
+glm.testprobs <- predict(glm.fit, wine_test, type="response")
+glm.testpred <- rep(0, 980)
+glm.testpred[glm.testprobs>0.5]=1
+glm.te.tab <- table(glm.testpred, wine_test$qual_bi)
+testglm.err <- mean(glm.testpred != wine_test$qual_bi)
+#3rd Linear Regression
+lm.fit <- lm(qual_bi~alcohol+volatile.acidity, wine_train)
+pred.lmtrain <- predict(lm.fit, wine_train)
+pred.lmtrain <- ifelse(pred.lmtrain <0.5, 0, 1)
+lm.tr.tab <- table(pred.lmtrain, wine_train$qual_bi)
+pred.lmtest <- predict(lm.fit, wine_test)
+pred.lmtest <- ifelse(pred.lmtest <0.5, 0, 1)
+lm.te.tab <- table(pred.lmtest, wine_test$qual_bi)
+lm.trerr <- (684+334)/3918
+lm.teerr <-  (180+81)/980
+#4th LDA
+lda.fit <- lda(qual_bi~alcohol+volatile.acidity, wine_train)
+ldatrain.pred <- predict(lda.fit, wine_train)
+ldatrain.predqual <- ldatrain.pred$class
+lda.tr.tab <- table(ldatrain.predqual, wine_train$qual_bi)
+ldatest.pred <- predict(lda.fit, wine_test)
+ldatest.predqual <- ldatest.pred$class
+lda.te.tab <- table(ldatest.predqual, wine_test$qual_bi)
+lda.trerr <- (653+369)/3918
+lda.teerr <- (171+91)/980
+results <- rbind(c(nB.trerr,trainglm.err,lm.trerr,lda.trerr ), c(nB.teerr,testglm.err,lm.teerr,lda.teerr))
+colnames(results) <- c("Naive Bayes", "Logistic Reg.", "Linear Reg", "LDA")
+rownames(results) <- c("Training Error", "Test Error")
+results
+#Show 2 decision boundaries:
+plot(wine_train$volatile.acidity, wine_train$alcohol, col=factor(wine_train$qual_bi), main="Comparison of Linear Classifiers", ylab="Alcohol", xlab="Volatile Acidity")
+abline(a=0.00227/0.1908, b=0.1181/0.1908,col="green")
+abline(a=-0.189053/1.0844, b=0.63168/1.0844, col="purple", lty=2)
+legend("topright", legend=c("Linear", "Logistic"), col=c("Green", "Purple"), lty=1:2)
+## FINISH THE GRAPH OF DECISION BOUNDARIES!
+plot(wine_train$volatile.acidity, wine_train$alcohol, col=factor(wine_train$qual_bi))
+abline(a=0, b=sqrt(1/log(0.6638591/0.3361409))) #Bayes?
+abline(a=sqrt(log(0.6638591/0.3361409)), b=1) #Bayes?
+abline(a=-0.1644/0.1908, b=0.1181/0.1908, col="chartreuse3", lty=3)
+abline(a=-0.8822/1.0844, b=0.63168/1.0844, col="darkorchid", lty=2)
+abline(a=-0.189053/1.0844, b=0.63168/1.0844) #Logistic
+abline(a=0.00227/1.0844,0.1181/0.1908) #Linear
+legend("topright", legend=c("Bayes", "Logistic", "Linear", "LDA"), col=c("black", "Purple", "Green", "Blue"), lty=1:4)
+```
+
+Naive Bayes yields the lowest test error of 0.261. The next lowest was linear regression with a test error 0.266 followed by LDA with a test error of 0.267. Logistic regression did the worst with a test error of 0.268. While we can rank these tests according to test error, they obviously do not differ by much. By looking at the plot of alcohol vs. volatile acidity (with color as the classification), we can see that while the groups overlap there is some distinction between them. 
+
+
+From the feature selection process I know that the 2-predictor model can be improved upon by using these 5 predictors: fixed acidity, volatile acidity, residual sugar, sulphates, and alcohol. 
+
+```{r}
+#First Naive Bayes
+nB.fit5 <- naiveBayes(qual_bi ~ alcohol + volatile.acidity + residual.sugar + fixed.acidity + sulphates, wine_train)
+nB.trainpred5 <- predict(nB.fit5, wine_train)
+nB.testpred5 <- predict(nB.fit5, wine_test)
+tr.table5 <- table(nB.trainpred5, wine_train$qual_bi)
+te.table5 <- table(nB.testpred5, wine_test$qual_bi)
+nB.trerr5 <- (652+478)/3918
+nB.teerr5 <- (171+124)/980
+#2nd Logistic Regression
+glm.fit5 <- glm(qual_bi ~ alcohol + volatile.acidity + residual.sugar + fixed.acidity + sulphates, wine_train, family="binomial")
+glm.probs5 <- predict(glm.fit5, type="response") 
+glm.pred5 <- rep(0,3918)
+glm.pred5[glm.probs5>.5]=1
+glm.tr.tab5 <- table(glm.pred5,wine_train$qual_bi)
+trainglm.err5 <- mean(glm.pred5 != wine_train$qual_bi)
+glm.testprobs5 <- predict(glm.fit5, wine_test, type="response")
+glm.testpred5 <- rep(0, 980)
+glm.testpred5[glm.testprobs5>0.5]=1
+glm.te.tab5 <- table(glm.testpred5, wine_test$qual_bi)
+testglm.err5 <- mean(glm.testpred5 != wine_test$qual_bi)
+#3rd Linear Regression
+lm.fit5 <- lm(qual_bi ~ alcohol + volatile.acidity + residual.sugar + fixed.acidity + sulphates, wine_train)
+pred.lmtrain5 <- predict(lm.fit5, wine_train)
+pred.lmtrain5 <- ifelse(pred.lmtrain5 <0.5, 0, 1)
+lm.tr.tab5 <- table(pred.lmtrain5, wine_train$qual_bi)
+pred.lmtest5 <- predict(lm.fit5, wine_test)
+pred.lmtest5 <- ifelse(pred.lmtest5 <0.5, 0, 1)
+lm.te.tab5 <- table(pred.lmtest5, wine_test$qual_bi)
+lm.trerr5 <- (687+283)/3918
+lm.teerr5 <-  (170+66)/980
+#4th LDA
+lda.fit5 <- lda(qual_bi ~ alcohol + volatile.acidity + residual.sugar + fixed.acidity + sulphates, wine_train)
+ldatrain.pred5 <- predict(lda.fit5, wine_train)
+ldatrain.predqual5 <- ldatrain.pred5$class
+lda.tr.tab5 <- table(ldatrain.predqual5, wine_train$qual_bi)
+ldatest.pred5 <- predict(lda.fit5, wine_test)
+ldatest.predqual5 <- ldatest.pred5$class
+lda.te.tab5 <- table(ldatest.predqual5, wine_test$qual_bi)
+lda.trerr5 <- (658+311)/3918
+lda.teerr5 <- (160+70)/980
+results5 <- rbind(c(nB.trerr,trainglm.err,lm.trerr,lda.trerr ), c(nB.teerr5,testglm.err5,lm.teerr5,lda.teerr5))
+colnames(results5) <- c("Naive Bayes", "Logistic Reg.", "Linear Reg", "LDA")
+rownames(results5) <- c("Test Error - 2", "Test Error - 5")
+results5
+```
+
+
+From the results of using the 5 predictors chosen as the best model through cross-validation, we can see that the test error improved a small amount in all cases but the Naive Bayes which went up. 
+
+#### Method 2: k-Nearest Neighbors
+
+```{r}
+set.seed(748)
+train.qual_bi <- wine_train$qual_bi
+train.X <- wine_train[,1:10]
+test.qual_bi <- wine_test$qual_bi
+test.X <- wine_test[,1:10]
+
+
+k.seq2 <- seq(from=1, to=20, by=1)
+knntest.errs2 <- numeric(length(k.seq2))
+knntr.errs2 <- numeric(length(k.seq2))
+for(i in 1:length(k.seq2)){
+  knn.pred <- knn(train.X, test.X, train.qual_bi, k=i)
+  knntest.errs2[i] <- mean(knn.pred != test.qual_bi)
+  knn.predtr <- knn(train.X, train.X, train.qual_bi, k=i)
+  knntr.errs2[i] <- mean(knn.predtr != train.qual_bi)
+}
+knntest.errs2
+
+k.seq3 <- seq(from=1, to=500, by=2)
+knntest.errs3 <- numeric(length(k.seq3))
+knntr.errs3 <- numeric(length(k.seq3))
+for(i in 1:length(k.seq3)){
+  knn.pred <- knn(train.X, test.X, train.qual_bi, k=i)
+  knntest.errs3[i] <- mean(knn.pred != test.qual_bi)
+  knn.predtr <- knn(train.X, train.X, train.qual_bi, k=i)
+  knntr.errs3[i] <- mean(knn.predtr != train.qual_bi)
+}
+plot(k.seq3, knntest.errs3)
+
+results_knn <- rbind(c(knntr.errs[1], knntr.errs[2], knntr.errs[3], knntr.errs[50], knntr.errs[100]),c(knntest.errs[1], knntest.errs[10], knntest.errs[25],knntest.errs[50], knntest.errs[100]))
+colnames(results_knn) <- c("1-NN", "10-NN", "25-NN", "50-NN", "100-NN")
+rownames(results_knn) <- c("Training Error", "Test Error")
+results_knn
+knn.results <- rbind(c(knntr.errs[1], knntr.errs[2], knntr.errs[3], knntr.errs[4], knntr.errs[5], knntr.errs[6], knntr.errs[7], knntr.errs[8], knntr.errs[9], knntr.errs[10]), c(knntest.errs[1], knntest.errs[2], knntest.errs[3], knntest.errs[4], knntest.errs[5], knntest.errs[6], knntest.errs[7], knntest.errs[8], knntest.errs[9], knntest.errs[10]))
+colnames(knn.results) <- c("1-NN", "2-NN", "3-NN", "4-NN", "5-NN", "6-NN", "7-NN", "8-NN", "9-NN", "10-NN")
+rownames(knn.results) <- c("Training Error", "Test Error")
+knn.results
+
+plot(k.seq3, knntest.errs3, main="K-NN Classification of Wine Quality", xlab="K", ylab="Test Classification Error")
+plot(k.seq2, knntest.errs2, main="K-NN Classification of Wine Quality", xlab="K", ylab="Test Classification Error")
+test_results <- c(knntest.errs[1], knntest.errs[8], knntest.errs[9])
+```
+
+
+From the results of the k-Nearest Neighbors for values between 1 and 500. From there I decided to explore the values of K between 1 and 20 (as they looked to have the smallest test error from the first run). The absolute lowest test error was 0.1908163 using K=1. The next smallest test error was 0.2071429 and came from using k=14. Larger values of k (20-500) had increasingly poor test error results. The maximum test error was 0.2765306 using k=467. The best knn results provide a smaller test error than the linear classifiers.  
+
+
+
+#### Method 3: SVM
+
+```{r, warning=FALSE}
+set.seed(748)
+train.x <- wine_train[,1:10]
+test.x <- wine_test[,1:10]
+train.y <- factor(train.qual_bi)
+test.y <- factor(test.qual_bi)
+
+tune.out=tune(svm,factor(qual_bi)~.,data=wine_train,kernel="linear",ranges=list(cost=c(0.001, 0.01, 0.1, 1,5,10,100)))
+summary(tune.out)#error: CV error rate
+bestmod=tune.out$best.model
+summary(bestmod) #0.1 is best
+
+svmfit=svm(factor(qual_bi)~., data=wine_train, kernel="linear", cost=.1,scale=FALSE)
+ypred=predict(svmfit,test.X)
+table(predict=ypred, truth=test.y)
+lin.test.err <- mean(ypred != test.y)
+
+
+set.seed(748)
+tune.out2=tune(svm,factor(qual_bi)~.,data=wine_train,kernel="polynomial",ranges=list(cost=c(0.01, 0.1, 1,5,10),gamma=0.1))
+
+summary(tune.out2)#error: CV error rate
+
+bestmod2=tune.out2$best.model
+summary(bestmod2) #1 is best
+
+svmfit2=svm(factor(qual_bi)~., data=wine_train, kernel="polynomial", cost=1, gamma=0.1, scale=FALSE)
+ypred2=predict(svmfit2,test.X)
+table(predict=ypred2, truth=test.y)
+poly1.test.err <- mean(ypred2 != test.y)
+
+tune.out3=tune(svm,factor(qual_bi)~.,data=wine_train,kernel="polynomial", degree=2, ranges=list(cost=c(0.01, 0.1, 1,5,10),gamma=0.1))
+summary(tune.out3)#error: CV error rate
+bestmod3=tune.out3$best.model
+summary(bestmod3) 
+
+svmfit3=svm(factor(qual_bi)~., data=wine_train, kernel="polynomial", degree=2, cost=1,scale=FALSE)
+ypred3=predict(svmfit3,test.X)
+table(predict=ypred3, truth=test.y)
+poly2.test.err <- mean(ypred3 != test.y)
+
+set.seed(748)
+tune.outr=tune(svm, factor(qual_bi)~., data=wine_train, kernel="radial", ranges = list(cost=c(0.1,1,10,100,1000), gamma=c(0.5,1,2,3,4)))
+summary(tune.outr)
+summary(tune.outr$best.model)
+
+table(true=test.y, pred = predict(tune.outr$best.model,newdata=test.X))
+rad.test.err <- mean(predict(tune.outr$best.model,newdata=test.X) != test.y)
+
+svm_results <- rbind(c(lin.test.err, poly2.test.err, poly1.test.err, rad.test.err), c(2298,2511, 2234, 2599), c(0.1,1,1,1))
+rownames(svm_results) <- c("Test Error", "Support Vectors", "Cost")
+colnames(svm_results) <- c("Linear", "Polynomial 2", "Polynomial 3", "Radial")
+svm_results
+```
+
+
+### Method 4: Classification Tree
+
+```{r, warning=FALSE}
+set.seed(748)
+wine.tree <- tree(factor(qual_bi)~., wine_train, split="gini")
+summary(wine.tree)
+plot(wine.tree)
+text(wine.tree , pretty = 0)
+
+tree.pred <- predict(wine.tree, wine_test, type="class")
+table(tree.pred, wine_test$qual_bi)
+tree.err <- (128+110)/980
+
+cv.wine <- cv.tree(wine.tree, FUN=prune.misclass)
+min(cv.wine$dev)
+
+par(mfrow=c(1,1))
+plot(cv.wine$size, cv.wine$dev, type="b")
+plot(cv.wine$k, cv.wine$dev, type="b")
+
+prune.wine <- prune.misclass(wine.tree, best = 14)
+plot(prune.wine)
+text(prune.wine , pretty = 0)
+prune.pred <- predict(prune.wine, wine_test, type="class")
+table(prune.pred, wine_test$qual_bi)
+prune.err <- (189+70)/980
+
+best_seq <- seq(from=2, to=150, by=2)
+tree.err <- numeric(length(best_seq))
+for(i in 1:length(best_seq)){
+  prune.wine <- prune.misclass(wine.tree, best=best_seq[i])
+  prune.pred <- predict(prune.wine, wine_test, type="class")
+  tree.err[i] <- mean(prune.pred != wine_test$qual_bi)
+}
+plot(best_seq, tree.err, main="Pruned Classification Trees", xlab="Number of Terminal Nodes", ylab="Test Classification Error",type="l")
+
+trees <- seq(from=10, to=500, by=5)
+rf.testerr = rep(NA, length(trees))
+for(i in 1:99){
+  rf.p <- randomForest(train.x, y = train.y, xtest = test.x, ytest = test.y, mtry = ncol(wine_train) - 1, ntree = trees[i])
+  rf.testerr[i] <- mean(rf.p$test$err.rate)
+}
+rf2.testerr = rep(NA, length(trees))
+for(i in 1:99){
+ rf.p2 <- randomForest(train.x, y = train.y, xtest = test.x, ytest = test.y, mtry = (ncol(wine_train) - 1) / 2, ntree = trees[i])
+ rf2.testerr[i] <- mean(rf.p2$test$err.rate)
+}
+rf3.testerr = rep(NA, length(trees))
+for(i in 1:99){
+ rf.sp <- randomForest(train.x, y = train.y, xtest = test.x, ytest = test.y, mtry = sqrt(ncol(wine_train) - 1), ntree = trees[i])
+ rf3.testerr[i] <- mean(rf.sp$test$err.rate)
+}
+plot(trees,rf.testerr, col = "green", type = "l", xlab = "Number of Trees", ylab = "Test Classification Error", main = "Random Forest Classification Error: Wine Quality" ,ylim = c(0.15, 0.25))
+lines(trees, rf2.testerr, col = "red", type = "l")
+lines(trees, rf3.testerr, col = "blue", type = "l")
+legend("topright", c("m = p", "m = p/2", "m = sqrt(p)"), col = c("green", "red", "blue"), cex =1, lty = 1)
+abline(h=0.177)
+min(rf.testerr); min(rf2.testerr); min(rf3.testerr)
+which.min(rf2.testerr) #to determine the index of the smallest error
+trees[59] #use the index to get the number of trees for smallest error
+```
+
+The cross validation-pruned classification tree used alcohol, volatile acidity, and free sulfur dioxide to make the splits. with alcohol being used twice. The test error for the pruned classification tree is 0.2643 while the test error for the full classification tree is slightly lower at 0.2429. However the pruned tree is much better for interpretation purposes. 
+
+The minimum test error (0.173064) occurs when m=p/2 and 300 trees are used.  
+
+```{r}
+#To build the tree for the smallest error and to find the most important vars. 
+rf.best <- randomForest(train.x, y = train.y, xtest = test.x, ytest = test.y, mtry = (ncol(wine_train) - 1)/2, ntree = 300, importance=TRUE)
+varImpPlot(rf.best, sort=TRUE, n.var = 5)
+importance(rf.best)
+```
+
+
+For the best random forest model (assessed by smallest test error) the top 5 important variables picked are alcohol, volatile acidity, free sulfur dioxide, total sulfur dioxide, residual sugar, and citric acid. The previous feature selection performed prior to regression found fixed acidity, volatile acidity, residual sugar, sulphates, and alcohol to be the top 5 important variables. These methods agree that alcohol, volatile acidity, and residual sugar are important. 
+
+
+
+### Conclusions
+
+The smallest test error achieved was 0.1739586 through the random forest method with $\sqrt p$ and 490 trees. SVM produced an error 0.1897959 when a radial kernel with a cost of 1 was used - this had 2599 support vectors. 
+
+```{r}
+#results table
+
+all_best_results <- c()
+colnames(all_best_results) <- c("NB", "KNN", "SVM", "RF")
+rownames(all_best_results) <- c("Test Error")
+```
+
+
+### Further research
+I think it would be interesting to apply a neural network to this data.
+
+In the future, I would want to use all k-classes of quality outcome rather than simplifying by splitting into 2 groupings.
+
+This wine set is somewhat outdated at this point (being from wines more than a decade ago). The physiochemical tests are pretty standard still for assessing the physical quality of the wine, but have expert wine tastes changed? Have the physical outcomes of these chemical tests changed substantially? Global exports of wine has grown so perhaps a larger variety of wine origin would be more meaningful for the global clientele.
+
+Expert tastes are potentially different from the consumer tastes. It would be interesting to use consumer purchase habits/feedback to classify wines as good/bad (or any number of k-classes). Do expert tastes actually relate/predict purchase numbers, price? For this type of learning to be more meaningful, ability to predict consumer tastes would be important. Although there is a certain group of consumers who will listen to expert tastes/opinions, there will always be those who follow their own tastes. 
+
